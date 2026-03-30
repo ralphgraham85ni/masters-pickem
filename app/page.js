@@ -2,14 +2,16 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
 
-// ─── SUPABASE ─────────────────────────────────────────────────────────────────
-const SUPABASE_URL  = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SUPABASE_KEY  = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+// ─── SUPABASE (single instance outside component) ─────────────────────────────
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+);
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const AUTO_REFRESH_SEC = 60;
-const MANAGE_PASSWORD = process.env.NEXT_PUBLIC_MANAGE_PASSWORD || "augusta2025";
+const MANAGE_PASSWORD  = process.env.NEXT_PUBLIC_MANAGE_PASSWORD || "augusta2025";
+const ESPN_URL         = "/api/espn";
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 function scoreDisplay(score) {
@@ -24,13 +26,7 @@ function scoreClass(score) {
   return "score-even";
 }
 
-// ─── ESPN FETCHER ─────────────────────────────────────────────────────────────
-const ESPN_URL = "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard";
-const PROXIES = [
-  "https://corsproxy.io/?",
-  "https://api.allorigins.win/get?url=",
-];
-
+// ─── NAME MATCHING ────────────────────────────────────────────────────────────
 function normaliseName(name) {
   return name.toLowerCase().normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "").replace(/[^a-z\s]/g, "").trim();
@@ -51,45 +47,59 @@ function findBestMatch(pickName, espnPlayers) {
   }
   return bestScore >= 0.8 ? best : null;
 }
+
+// ─── ESPN FETCHER ─────────────────────────────────────────────────────────────
 async function fetchGolferScores(golferNames) {
   let data = null;
-for (const proxy of PROXIES) {
-  try {
-    const url = proxy + encodeURIComponent(ESPN_URL);
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!res.ok) continue;
-    const raw = await res.json();
-    // allorigins wraps in {contents:}, corsproxy.io returns directly
-    data = raw.contents ? JSON.parse(raw.contents) : raw;
-    if (data?.events) break;
-  } catch { continue; }
-}
-if (!data) throw new Error("All proxies failed");
-  const competitors = data?.events?.[0]?.competitions?.[0]?.competitors ?? [];
-  const espnPlayers = competitors.map((c) => {
-    const athlete = c.athlete ?? {}, stats = c.statistics ?? [];
-    const statusName = c.status?.type?.name ?? "";
-    const toParStat = stats.find((s) => s.name === "scoreToPar" || s.abbreviation === "TOT" || s.name === "toPar");
-    let score = 0;
-    if (toParStat) { const raw = toParStat.displayValue; score = raw === "E" ? 0 : (parseInt(raw, 10) || 0); }
-    const missedCut = ["STATUS_MISSED_CUT", "STATUS_WITHDRAWN", "STATUS_DISQUALIFIED"].includes(statusName);
+  let lastError = "";
 
-    // Round-by-round scores from linescores
-    // ESPN stores gross scores per round; we convert to relative-to-par (par 72 at Augusta)
-    const PAR = 72;
-    const rounds = (c.linescores ?? []).slice(0, 4).map((r) => {
-      const gross = parseInt(r.value, 10);
-      if (isNaN(gross) || gross === 0) return null;
-      return gross - PAR;
-    });
-    // Pad to 4 rounds with null if not yet played
-    while (rounds.length < 4) rounds.push(null);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(ESPN_URL);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const json = await res.json();
+      if (json.error) throw new Error(json.error);
+      if (json.events) { data = json; break; }
+    } catch (e) {
+      lastError = e.message;
+      await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+    }
+  }
+
+  if (!data) throw new Error("ESPN unavailable: " + lastError);
+
+  const competitors = data?.events?.[0]?.competitions?.[0]?.competitors ?? [];
+
+  const espnPlayers = competitors.map((c) => {
+    const athlete = c.athlete ?? {};
+
+    // Total score is directly on competitor as a string e.g. "-21", "E", "+3"
+    const rawScore = c.score ?? "0";
+    const score = rawScore === "E" ? 0 : (parseInt(rawScore, 10) || 0);
+
+    // Missed cut = only 1 or 2 rounds played (covers WD after R1 too)
+    const roundsPlayed = (c.linescores ?? []).length;
+    const missedCut = roundsPlayed <= 2;
+
+    // Round scores from linescores — each has period (1-4) and displayValue like "-6", "E"
+    const rounds = [null, null, null, null];
+    for (const round of (c.linescores ?? [])) {
+      const idx = (round.period ?? 0) - 1;
+      if (idx >= 0 && idx <= 3) {
+        const dv = round.displayValue ?? "";
+        rounds[idx] = dv === "E" ? 0 : (parseInt(dv, 10) || null);
+      }
+    }
 
     return {
-      espnName: ((athlete.firstName ?? "") + " " + (athlete.lastName ?? "")).trim(),
-      score, missedCut, position: c.status?.displayValue ?? "-", rounds,
+      espnName: (athlete.displayName ?? athlete.fullName ?? "").trim(),
+      score,
+      missedCut,
+      position: c.status?.displayValue ?? "-",
+      rounds,
     };
   });
+
   const result = {};
   for (const name of golferNames) {
     const match = findBestMatch(name, espnPlayers);
@@ -117,10 +127,11 @@ export default function MastersLeaderboard() {
   const [expandedId, setExpandedId]     = useState(null);
   const [saving, setSaving]             = useState(false);
   const [manageUnlocked, setManageUnlocked] = useState(false);
-  const [pwInput, setPwInput]             = useState("");
-  const [pwError, setPwError]             = useState(false);
+  const [pwInput, setPwInput]           = useState("");
+  const [pwError, setPwError]           = useState(false);
   const countdownRef = useRef(null);
   const refreshRef   = useRef(null);
+  const hasFetchedRef = useRef(false);
 
   // ── Load picks from Supabase ──
   const loadPicks = useCallback(async () => {
@@ -132,12 +143,11 @@ export default function MastersLeaderboard() {
         .select("*")
         .order("created_at", { ascending: true });
       if (error) throw error;
-      const mapped = data.map((row) => ({
+      setPicks(data.map((row) => ({
         id: row.id,
         name: row.name,
         golfers: [row.golfer1 || "", row.golfer2 || "", row.golfer3 || "", row.golfer4 || ""],
-      }));
-      setPicks(mapped);
+      })));
     } catch (e) {
       setDbError("Could not load picks from database.");
     } finally {
@@ -147,7 +157,7 @@ export default function MastersLeaderboard() {
 
   useEffect(() => { loadPicks(); }, [loadPicks]);
 
-  // ── Save / update pick in Supabase ──
+  // ── Save / update pick ──
   const savePick = async () => {
     setSaving(true);
     setDbError(null);
@@ -206,18 +216,24 @@ export default function MastersLeaderboard() {
     }
   }, [picks]);
 
-useEffect(() => {
-  if (picks.length > 0) {
-    refreshScores(false);
-  }
-}, []); // eslint-disable-line — only fire once on mount after picks load
+  // ── Fetch scores once after picks load ──
+  useEffect(() => {
+    if (picks.length > 0 && !hasFetchedRef.current) {
+      hasFetchedRef.current = true;
+      refreshScores(false);
+    }
+  }, [picks]); // eslint-disable-line
 
- useEffect(() => {
-  clearInterval(refreshRef.current);
-  refreshRef.current = setInterval(() => refreshScores(true), AUTO_REFRESH_SEC * 1000);
-  return () => clearInterval(refreshRef.current);
-}, []); // eslint-disable-line
+  // ── Auto-refresh every 60s ──
+  useEffect(() => {
+    clearInterval(refreshRef.current);
+    refreshRef.current = setInterval(() => {
+      if (picks.length > 0) refreshScores(true);
+    }, AUTO_REFRESH_SEC * 1000);
+    return () => clearInterval(refreshRef.current);
+  }, []); // eslint-disable-line
 
+  // ── Countdown ticker ──
   useEffect(() => {
     clearInterval(countdownRef.current);
     countdownRef.current = setInterval(() => {
@@ -247,6 +263,7 @@ useEffect(() => {
       return a.total - b.total;
     });
 
+  // ── Edit handlers ──
   const startEdit = (pick) => {
     setEditingPick(pick.id);
     setEditForm({ name: pick.name, golfers: [...pick.golfers] });
@@ -338,7 +355,7 @@ useEffect(() => {
         .friend-total.score-neutral { color: rgba(255,255,255,0.4); font-size: 16px; }
         .chevron { font-size: 11px; color: rgba(255,255,255,0.4); margin-left: 10px; transition: transform 0.25s; display: inline-block; }
         .chevron.open { transform: rotate(180deg); }
-        .golfer-grid { display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; max-height: 0; transition: max-height 0.3s ease; }
+        .golfer-grid { display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; max-height: 0; transition: max-height 0.35s ease; }
         .golfer-grid.expanded { max-height: 600px; }
         .golfer-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 18px; border-bottom: 1px solid #f0e8d8; border-right: 1px solid #f0e8d8; gap: 8px; }
         .golfer-row:nth-child(2n) { border-right: none; }
@@ -351,16 +368,14 @@ useEffect(() => {
         .mc-badge { font-size: 9px; font-weight: 700; background: var(--red); color: white; border-radius: 3px; padding: 1px 5px; margin-left: 4px; vertical-align: middle; }
         .penalty-note { font-size: 10px; color: var(--red); display: block; text-align: right; }
 
-        .rounds-section { padding: 10px 18px 12px; background: #f9f5ec; border-top: 1px solid #ede5d4; }
+        .rounds-section { padding: 10px 18px 14px; background: #f9f5ec; border-top: 1px solid #ede5d4; grid-column: 1 / -1; }
         .rounds-header { font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #999; margin-bottom: 8px; }
         .rounds-table { width: 100%; border-collapse: collapse; }
         .rounds-table th { font-size: 10px; font-weight: 700; color: #aaa; text-align: center; padding: 3px 6px; letter-spacing: 0.06em; }
+        .rounds-table th:first-child { text-align: left; }
         .rounds-table td { font-size: 13px; font-weight: 600; text-align: center; padding: 5px 6px; border-top: 1px solid #ede5d4; }
-        .rounds-table td:first-child { text-align: left; font-size: 12px; color: #555; font-weight: 400; max-width: 120px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .round-under { color: #1a7a3a; }
-        .round-over  { color: var(--red); }
-        .round-even  { color: #555; }
-        .round-na    { color: #ccc; font-size: 11px; font-weight: 400; }
+        .rounds-table td:first-child { text-align: left; font-size: 12px; color: #555; font-weight: 400; }
+        .round-under { color: #1a7a3a; } .round-over { color: var(--red); } .round-even { color: #555; } .round-na { color: #ccc; font-size: 11px; font-weight: 400; }
 
         .picks-grid { display: flex; flex-direction: column; gap: 16px; }
         .pick-card { background: var(--warm-white); border-radius: 10px; border: 1px solid #e8e0d0; padding: 16px 18px; }
@@ -383,18 +398,6 @@ useEffect(() => {
         .btn-add { background: var(--gold); color: var(--green-deep); border: none; border-radius: 8px; padding: 11px 20px; font-size: 14px; font-weight: 700; cursor: pointer; font-family: 'Source Sans 3', sans-serif; transition: background 0.2s; margin-top: 4px; }
         .btn-add:hover { background: var(--gold-light); }
 
-        .edit-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 16px; }
-        .edit-modal { background: var(--warm-white); border-radius: 14px; padding: 24px; width: 100%; max-width: 400px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
-        .edit-modal h3 { font-family: 'Playfair Display', serif; font-size: 20px; font-weight: 700; color: var(--green-deep); margin-bottom: 18px; }
-        .form-group { margin-bottom: 14px; }
-        .form-label { font-size: 12px; font-weight: 700; letter-spacing: 0.06em; color: #666; text-transform: uppercase; display: block; margin-bottom: 5px; }
-        .form-input { width: 100%; padding: 9px 12px; border: 1px solid #ddd; border-radius: 7px; font-size: 14px; font-family: 'Source Sans 3', sans-serif; background: white; color: #1a1a1a; }
-        .form-input:focus { outline: none; border-color: var(--green-light); }
-        .form-actions { display: flex; gap: 10px; margin-top: 20px; }
-        .btn-save { flex: 1; background: var(--green-deep); color: var(--gold); border: none; border-radius: 8px; padding: 11px; font-size: 14px; font-weight: 700; cursor: pointer; font-family: 'Source Sans 3', sans-serif; }
-        .btn-save:disabled { opacity: 0.6; cursor: not-allowed; }
-        .btn-cancel { flex: 1; background: white; color: #666; border: 1px solid #ddd; border-radius: 8px; padding: 11px; font-size: 14px; cursor: pointer; font-family: 'Source Sans 3', sans-serif; }
-
         .pw-gate { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 48px 24px; gap: 16px; }
         .pw-gate-icon { font-size: 36px; margin-bottom: 4px; }
         .pw-gate h3 { font-family: 'Playfair Display', serif; font-size: 20px; font-weight: 700; color: var(--green-deep); }
@@ -407,8 +410,20 @@ useEffect(() => {
         .pw-btn { background: var(--green-deep); color: var(--gold); border: none; border-radius: 8px; padding: 10px 18px; font-size: 14px; font-weight: 700; cursor: pointer; font-family: 'Source Sans 3', sans-serif; transition: background 0.2s; white-space: nowrap; }
         .pw-btn:hover { background: var(--green-mid); }
         .pw-error { font-size: 12px; color: var(--red); margin-top: -8px; }
+
+        .edit-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 16px; }
+        .edit-modal { background: var(--warm-white); border-radius: 14px; padding: 24px; width: 100%; max-width: 400px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+        .edit-modal h3 { font-family: 'Playfair Display', serif; font-size: 20px; font-weight: 700; color: var(--green-deep); margin-bottom: 18px; }
+        .form-group { margin-bottom: 14px; }
+        .form-label { font-size: 12px; font-weight: 700; letter-spacing: 0.06em; color: #666; text-transform: uppercase; display: block; margin-bottom: 5px; }
+        .form-input { width: 100%; padding: 9px 12px; border: 1px solid #ddd; border-radius: 7px; font-size: 14px; font-family: 'Source Sans 3', sans-serif; background: white; color: #1a1a1a; }
+        .form-input:focus { outline: none; border-color: var(--green-light); }
+        .form-actions { display: flex; gap: 10px; margin-top: 20px; }
+        .btn-save { flex: 1; background: var(--green-deep); color: var(--gold); border: none; border-radius: 8px; padding: 11px; font-size: 14px; font-weight: 700; cursor: pointer; font-family: 'Source Sans 3', sans-serif; }
+        .btn-save:disabled { opacity: 0.6; cursor: not-allowed; }
+        .btn-cancel { flex: 1; background: white; color: #666; border: 1px solid #ddd; border-radius: 8px; padding: 11px; font-size: 14px; cursor: pointer; font-family: 'Source Sans 3', sans-serif; }
+
         .loading-state { text-align: center; padding: 40px; color: #aaa; }
-        .loading-state .spin { font-size: 24px; display: inline-block; margin-bottom: 10px; }
         .empty-state { text-align: center; padding: 40px; color: #aaa; font-style: italic; }
         .footer { text-align: center; padding: 16px; font-size: 11px; color: #aaa; letter-spacing: 0.05em; border-top: 1px solid #e8e0d0; }
 
@@ -462,10 +477,7 @@ useEffect(() => {
               {error && <div className="error-bar">⚠️ {error}</div>}
 
               {picksLoading && (
-                <div className="loading-state">
-                  <div className="spin">↻</div>
-                  <div>Loading picks…</div>
-                </div>
+                <div className="loading-state"><span className="spin">↻</span> Loading picks…</div>
               )}
 
               {!picksLoading && scoresLoaded && friendTotals.length > 0 && (() => {
@@ -536,14 +548,13 @@ useEffect(() => {
                             </div>
                           </div>
                         ))}
-                        {/* Round breakdown — spans full width below the 2-col grid */}
                         {isOpen && (
-                          <div className="rounds-section" style={{ gridColumn: "1 / -1" }}>
+                          <div className="rounds-section">
                             <div className="rounds-header">Round by Round</div>
                             <table className="rounds-table">
                               <thead>
                                 <tr>
-                                  <th style={{ textAlign: "left" }}>Player</th>
+                                  <th>Player</th>
                                   <th>R1</th><th>R2</th><th>R3</th><th>R4</th>
                                 </tr>
                               </thead>
@@ -554,12 +565,11 @@ useEffect(() => {
                                   return (
                                     <tr key={g.name}>
                                       <td>{g.name.split(" ").pop()}</td>
-                                      {rounds.map((r, ri) => {
-                                        // R3/R4 for missed cut players = N/A
+                                      {rounds.map((round, ri) => {
                                         if (mc && ri >= 2) return <td key={ri} className="round-na">N/A</td>;
-                                        if (r === null) return <td key={ri} className="round-na">—</td>;
-                                        const cls = r < 0 ? "round-under" : r > 0 ? "round-over" : "round-even";
-                                        return <td key={ri} className={cls}>{scoreDisplay(r)}</td>;
+                                        if (round === null) return <td key={ri} className="round-na">—</td>;
+                                        const cls = round < 0 ? "round-under" : round > 0 ? "round-over" : "round-even";
+                                        return <td key={ri} className={cls}>{scoreDisplay(round)}</td>;
                                       })}
                                     </tr>
                                   );
