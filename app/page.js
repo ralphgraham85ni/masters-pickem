@@ -26,7 +26,10 @@ function scoreClass(score) {
 
 // ─── ESPN FETCHER ─────────────────────────────────────────────────────────────
 const ESPN_URL = "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard";
-const PROXY    = "https://api.allorigins.win/get?url=";
+const PROXIES = [
+  "https://corsproxy.io/?",
+  "https://api.allorigins.win/get?url=",
+];
 
 function normaliseName(name) {
   return name.toLowerCase().normalize("NFD")
@@ -49,11 +52,19 @@ function findBestMatch(pickName, espnPlayers) {
   return bestScore >= 0.8 ? best : null;
 }
 async function fetchGolferScores(golferNames) {
-  const url = PROXY + encodeURIComponent(ESPN_URL);
-  const res = await fetch(url);
-  if (!res.ok) throw new Error("Fetch failed: " + res.status);
-  const wrapper = await res.json();
-  const data = JSON.parse(wrapper.contents);
+  let data = null;
+for (const proxy of PROXIES) {
+  try {
+    const url = proxy + encodeURIComponent(ESPN_URL);
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) continue;
+    const raw = await res.json();
+    // allorigins wraps in {contents:}, corsproxy.io returns directly
+    data = raw.contents ? JSON.parse(raw.contents) : raw;
+    if (data?.events) break;
+  } catch { continue; }
+}
+if (!data) throw new Error("All proxies failed");
   const competitors = data?.events?.[0]?.competitions?.[0]?.competitors ?? [];
   const espnPlayers = competitors.map((c) => {
     const athlete = c.athlete ?? {}, stats = c.statistics ?? [];
