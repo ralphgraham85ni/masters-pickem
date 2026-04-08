@@ -68,19 +68,19 @@ async function fetchGolferScores(golferNames) {
 
   if (!data) throw new Error("ESPN unavailable: " + lastError);
 
-  const competitors = data?.events?.[0]?.competitions?.[0]?.competitors ?? [];
+const competitors = data?.events?.[0]?.competitions?.[0]?.competitors ?? [];
 
-  const espnPlayers = competitors.map((c) => {
-    const athlete = c.athlete ?? {};
+// Find the furthest round any player has reached
+// If nobody has played more than 2 rounds, the cut hasn't happened yet
+const maxRoundsPlayed = Math.max(0, ...competitors.map(c => (c.linescores ?? []).length));
+const cutHasHappened = maxRoundsPlayed >= 3;
 
-    // Total score is directly on competitor as a string e.g. "-21", "E", "+3"
-    const rawScore = c.score ?? "0";
-    const score = rawScore === "E" ? 0 : (parseInt(rawScore, 10) || 0);
-
-    // Missed cut = only 1 or 2 rounds played (covers WD after R1 too)
-    const roundsPlayed = (c.linescores ?? []).length;
-    const missedCut = roundsPlayed <= 2;
-
+const espnPlayers = competitors.map((c) => {
+  const athlete = c.athlete ?? {};
+  const rawScore = c.score ?? "0";
+  const score = rawScore === "E" ? 0 : (parseInt(rawScore, 10) || 0);
+  const roundsPlayed = (c.linescores ?? []).length;
+  const missedCut = cutHasHappened && roundsPlayed <= 2;
     // Round scores from linescores — each has period (1-4) and displayValue like "-6", "E"
     const rounds = [null, null, null, null];
     for (const round of (c.linescores ?? [])) {
