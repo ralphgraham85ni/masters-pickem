@@ -85,8 +85,10 @@ const espnPlayers = competitors.map((c) => {
 
   // ESPN adds placeholder rounds with value:0 and displayValue:"-" for missed cut players
 // Count only rounds that have actually been played
-const roundsPlayed = (c.linescores ?? []).filter(r => r.value > 0 || r.displayValue !== "-").length;
-const missedCut = cutHasHappened && roundsPlayed <= 2;
+const roundsPlayed = (c.linescores ?? []).filter(
+  r => r.value > 0 || r.displayValue !== "-"
+).length;
+const missedCut = cutHasHappened && roundsPlayed <= 2 && score > 0;
 
 
 
