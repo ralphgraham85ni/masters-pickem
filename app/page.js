@@ -75,7 +75,9 @@ const espnPlayers = competitors.map((c) => {
   const rawScore = c.score ?? "0";
   const score = rawScore === "E" ? 0 : (parseInt(rawScore, 10) || 0);
   const roundsPlayed = (c.linescores ?? []).length;
-  const missedCut = roundsPlayed <= 2;
+const maxRoundsPlayed = Math.max(0, ...competitors.map(c => (c.linescores ?? []).length));
+const cutHasHappened = maxRoundsPlayed >= 3;
+const missedCut = cutHasHappened && roundsPlayed <= 2;
 
 
 
