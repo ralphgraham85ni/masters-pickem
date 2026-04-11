@@ -2,7 +2,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
 
-// ─── SUPABASE (single instance outside component) ─────────────────────────────
+// ─── SUPABASE ─────────────────────────────────────────────────────────────────
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
@@ -52,7 +52,6 @@ function findBestMatch(pickName, espnPlayers) {
 async function fetchGolferScores(golferNames) {
   let data = null;
   let lastError = "";
-
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const res = await fetch(ESPN_URL);
@@ -65,32 +64,42 @@ async function fetchGolferScores(golferNames) {
       await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
     }
   }
-
   if (!data) throw new Error("ESPN unavailable: " + lastError);
 
-const competitors = data?.events?.[0]?.competitions?.[0]?.competitors ?? [];
+  const competitors = data?.events?.[0]?.competitions?.[0]?.competitors ?? [];
 
-// Find the furthest round any player has reached
-// If nobody has played more than 2 rounds, the cut hasn't happened yet
-const maxRoundsPlayed = Math.max(0, ...competitors.map(c => (c.linescores ?? []).length));
-console.log("Max rounds played:", maxRoundsPlayed, "Cut happened:", cutHasHappened);
-console.log("Sample round counts:", competitors.slice(0, 5).map(c => ({
-  name: c.athlete?.displayName,
-  rounds: (c.linescores ?? []).length
-})));
+  // ── DEBUG: log total competitors and round distribution ──
+  const roundCounts = competitors.map(c => (c.linescores ?? []).length);
+  const maxRoundsPlayed = Math.max(0, ...roundCounts);
+  const cutHasHappened = maxRoundsPlayed >= 3;
+  const roundDist = roundCounts.reduce((acc, r) => { acc[r] = (acc[r] || 0) + 1; return acc; }, {});
 
-const cutHasHappened = maxRoundsPlayed >= 3;
+  console.log("=== ESPN DEBUG ===");
+  console.log("Total competitors:", competitors.length);
+  console.log("Max rounds played:", maxRoundsPlayed);
+  console.log("Cut has happened:", cutHasHappened);
+  console.log("Round distribution (rounds: count):", JSON.stringify(roundDist));
+  console.log("Sample players (first 5):", JSON.stringify(
+    competitors.slice(0, 5).map(c => ({
+      name: c.athlete?.displayName,
+      score: c.score,
+      rounds: (c.linescores ?? []).length
+    }))
+  ));
+  console.log("Players with <= 2 rounds:", JSON.stringify(
+    competitors
+      .filter(c => (c.linescores ?? []).length <= 2)
+      .map(c => ({ name: c.athlete?.displayName, rounds: (c.linescores ?? []).length, score: c.score }))
+  ));
+  console.log("=== END DEBUG ===");
 
-const espnPlayers = competitors.map((c) => {
-  const athlete = c.athlete ?? {};
-  const rawScore = c.score ?? "0";
-  const score = rawScore === "E" ? 0 : (parseInt(rawScore, 10) || 0);
-  const roundsPlayed = (c.linescores ?? []).length;
-  const missedCut = cutHasHappened && roundsPlayed <= 2;
+  const espnPlayers = competitors.map((c) => {
+    const athlete = c.athlete ?? {};
+    const rawScore = c.score ?? "0";
+    const score = rawScore === "E" ? 0 : (parseInt(rawScore, 10) || 0);
+    const roundsPlayed = (c.linescores ?? []).length;
+    const missedCut = cutHasHappened && roundsPlayed <= 2;
 
-
-
-    // Round scores from linescores — each has period (1-4) and displayValue like "-6", "E"
     const rounds = [null, null, null, null];
     for (const round of (c.linescores ?? [])) {
       const idx = (round.period ?? 0) - 1;
@@ -102,54 +111,80 @@ const espnPlayers = competitors.map((c) => {
 
     return {
       espnName: (athlete.displayName ?? athlete.fullName ?? "").trim(),
-      score,
-      missedCut,
-      position: c.status?.displayValue ?? "-",
-      rounds,
+      score, missedCut, position: c.status?.displayValue ?? "-", rounds,
     };
   });
 
+  // ── DEBUG: log matched picks ──
   const result = {};
   for (const name of golferNames) {
     const match = findBestMatch(name, espnPlayers);
     result[name] = match
       ? { score: match.score, missedCut: match.missedCut, position: match.position, rounds: match.rounds }
       : { score: 0, missedCut: false, position: "-", rounds: [null, null, null, null] };
+    console.log("Pick:", name, "→ matched:", match?.espnName ?? "NO MATCH", "| missedCut:", result[name].missedCut, "| score:", result[name].score);
   }
+
   return result;
 }
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function MastersLeaderboard() {
-  const [picks, setPicks]               = useState([]);
-  const [scores, setScores]             = useState({});
-  const [loading, setLoading]           = useState(false);
-  const [picksLoading, setPicksLoading] = useState(true);
-  const [lastUpdated, setLastUpdated]   = useState(null);
-  const [countdown, setCountdown]       = useState(AUTO_REFRESH_SEC);
-  const [view, setView]                 = useState("leaderboard");
-  const [editingPick, setEditingPick]   = useState(null);
-  const [editForm, setEditForm]         = useState({ name: "", golfers: ["", "", "", ""] });
-  const [error, setError]               = useState(null);
-  const [dbError, setDbError]           = useState(null);
-  const [scoresLoaded, setScoresLoaded] = useState(false);
-  const [expandedId, setExpandedId]     = useState(null);
-  const [saving, setSaving]             = useState(false);
+  const [picks, setPicks]                   = useState([]);
+  const [scores, setScores]                 = useState({});
+  const [loading, setLoading]               = useState(false);
+  const [picksLoading, setPicksLoading]     = useState(true);
+  const [lastUpdated, setLastUpdated]       = useState(null);
+  const [countdown, setCountdown]           = useState(AUTO_REFRESH_SEC);
+  const [view, setView]                     = useState("leaderboard");
+  const [editingPick, setEditingPick]       = useState(null);
+  const [editForm, setEditForm]             = useState({ name: "", golfers: ["", "", "", ""] });
+  const [error, setError]                   = useState(null);
+  const [dbError, setDbError]               = useState(null);
+  const [scoresLoaded, setScoresLoaded]     = useState(false);
+  const [expandedId, setExpandedId]         = useState(null);
+  const [saving, setSaving]                 = useState(false);
   const [manageUnlocked, setManageUnlocked] = useState(false);
-  const [pwInput, setPwInput]           = useState("");
-  const [pwError, setPwError]           = useState(false);
-  const countdownRef = useRef(null);
-  const refreshRef   = useRef(null);
+  const [pwInput, setPwInput]               = useState("");
+  const [pwError, setPwError]               = useState(false);
+  const [debugInfo, setDebugInfo]           = useState("");
+  const [activeTournament, setActiveTournament]   = useState(null);
+  const [allTournaments, setAllTournaments]         = useState([]);
+  const [tournamentForm, setTournamentForm]         = useState({ name: "", year: new Date().getFullYear() });
+  const [savingTournament, setSavingTournament]     = useState(false);
+  const [manageTab, setManageTab]                   = useState("picks");
+  const countdownRef  = useRef(null);
+  const refreshRef    = useRef(null);
   const hasFetchedRef = useRef(false);
 
-  // ── Load picks from Supabase ──
-  const loadPicks = useCallback(async () => {
+  // ── Load tournaments ──
+  const loadTournaments = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from("tournaments")
+        .select("*")
+        .order("created_at", { ascending: false });
+      if (error) throw error;
+      setAllTournaments(data);
+      const active = data.find(t => t.active);
+      if (active) setActiveTournament(active);
+    } catch (e) {
+      setDbError("Could not load tournaments.");
+    }
+  }, []);
+
+  useEffect(() => { loadTournaments(); }, [loadTournaments]);
+
+  // ── Load picks ──
+  const loadPicks = useCallback(async (tournamentId) => {
+    if (!tournamentId) return;
     setPicksLoading(true);
     setDbError(null);
     try {
       const { data, error } = await supabase
         .from("picks")
         .select("*")
+        .eq("tournament_id", tournamentId)
         .order("created_at", { ascending: true });
       if (error) throw error;
       setPicks(data.map((row) => ({
@@ -164,10 +199,16 @@ export default function MastersLeaderboard() {
     }
   }, []);
 
-  useEffect(() => { loadPicks(); }, [loadPicks]);
+  useEffect(() => {
+    if (activeTournament) {
+      hasFetchedRef.current = false;
+      loadPicks(activeTournament.id);
+    }
+  }, [activeTournament, loadPicks]);
 
-  // ── Save / update pick ──
+  // ── Save pick ──
   const savePick = async () => {
+    if (!activeTournament) return;
     setSaving(true);
     setDbError(null);
     const row = {
@@ -176,6 +217,7 @@ export default function MastersLeaderboard() {
       golfer2: editForm.golfers[1] || "",
       golfer3: editForm.golfers[2] || "",
       golfer4: editForm.golfers[3] || "",
+      tournament_id: activeTournament.id,
     };
     try {
       if (editingPick === "new") {
@@ -185,7 +227,7 @@ export default function MastersLeaderboard() {
         const { error } = await supabase.from("picks").update(row).eq("id", editingPick);
         if (error) throw error;
       }
-      await loadPicks();
+      await loadPicks(activeTournament.id);
       setEditingPick(null);
     } catch (e) {
       setDbError("Could not save picks. Please try again.");
@@ -200,9 +242,51 @@ export default function MastersLeaderboard() {
     try {
       const { error } = await supabase.from("picks").delete().eq("id", id);
       if (error) throw error;
-      await loadPicks();
+      await loadPicks(activeTournament.id);
     } catch (e) {
       setDbError("Could not delete pick.");
+    }
+  };
+
+  // ── Create tournament ──
+  const createTournament = async () => {
+    if (!tournamentForm.name.trim()) return;
+    setSavingTournament(true);
+    setDbError(null);
+    try {
+      await supabase.from("tournaments").update({ active: false }).neq("id", 0);
+      const { data, error } = await supabase
+        .from("tournaments")
+        .insert([{ name: tournamentForm.name, year: tournamentForm.year, active: true }])
+        .select().single();
+      if (error) throw error;
+      await loadTournaments();
+      setActiveTournament(data);
+      setTournamentForm({ name: "", year: new Date().getFullYear() });
+      setPicks([]);
+      setScores({});
+      setScoresLoaded(false);
+      hasFetchedRef.current = false;
+    } catch (e) {
+      setDbError("Could not create tournament.");
+    } finally {
+      setSavingTournament(false);
+    }
+  };
+
+  // ── Set active tournament ──
+  const setTournamentActive = async (tournament) => {
+    setDbError(null);
+    try {
+      await supabase.from("tournaments").update({ active: false }).neq("id", 0);
+      await supabase.from("tournaments").update({ active: true }).eq("id", tournament.id);
+      await loadTournaments();
+      setActiveTournament(tournament);
+      setScores({});
+      setScoresLoaded(false);
+      hasFetchedRef.current = false;
+    } catch (e) {
+      setDbError("Could not switch tournament.");
     }
   };
 
@@ -217,6 +301,9 @@ export default function MastersLeaderboard() {
       setScores(result);
       setLastUpdated(new Date());
       setScoresLoaded(true);
+      // ── Show debug summary on screen ──
+      const mcPlayers = Object.entries(result).filter(([, v]) => v.missedCut).map(([k]) => k);
+      setDebugInfo("Players detected as MC: " + (mcPlayers.length > 0 ? mcPlayers.join(", ") : "none") + " | Check browser console for full details");
     } catch (e) {
       setError("Could not reach ESPN. Will retry next cycle.");
     } finally {
@@ -225,7 +312,6 @@ export default function MastersLeaderboard() {
     }
   }, [picks]);
 
-  // ── Fetch scores once after picks load ──
   useEffect(() => {
     if (picks.length > 0 && !hasFetchedRef.current) {
       hasFetchedRef.current = true;
@@ -233,7 +319,6 @@ export default function MastersLeaderboard() {
     }
   }, [picks]); // eslint-disable-line
 
-  // ── Auto-refresh every 60s ──
   useEffect(() => {
     clearInterval(refreshRef.current);
     refreshRef.current = setInterval(() => {
@@ -242,7 +327,6 @@ export default function MastersLeaderboard() {
     return () => clearInterval(refreshRef.current);
   }, []); // eslint-disable-line
 
-  // ── Countdown ticker ──
   useEffect(() => {
     clearInterval(countdownRef.current);
     countdownRef.current = setInterval(() => {
@@ -272,11 +356,9 @@ export default function MastersLeaderboard() {
       return a.total - b.total;
     });
 
-  // ── Edit handlers ──
   const startEdit = (pick) => {
     setEditingPick(pick.id);
     setEditForm({ name: pick.name, golfers: [...pick.golfers] });
-    setView("manage");
   };
 
   const medals = ["🥇", "🥈", "🥉"];
@@ -303,6 +385,7 @@ export default function MastersLeaderboard() {
         .header-flag { font-size: 11px; letter-spacing: 0.3em; text-transform: uppercase; color: var(--gold); margin-bottom: 8px; font-weight: 600; }
         .header h1 { font-family: 'Playfair Display', serif; font-size: clamp(26px, 6vw, 42px); font-weight: 900; color: var(--warm-white); line-height: 1.1; }
         .header h1 span { color: var(--gold); }
+        .tournament-badge { display: inline-block; margin-top: 8px; background: rgba(201,168,76,0.15); border: 1px solid rgba(201,168,76,0.3); border-radius: 20px; padding: 3px 14px; font-size: 12px; color: var(--gold); letter-spacing: 0.06em; }
         .header-sub { font-size: 13px; color: rgba(255,255,255,0.55); margin-top: 6px; letter-spacing: 0.05em; }
         .header-divider { width: 60px; height: 2px; background: linear-gradient(90deg, transparent, var(--gold), transparent); margin: 14px auto 0; }
 
@@ -313,6 +396,8 @@ export default function MastersLeaderboard() {
         .nav button:hover:not(.active) { color: rgba(255,255,255,0.9); }
 
         .main { flex: 1; padding: 20px 16px 40px; max-width: 760px; margin: 0 auto; width: 100%; }
+
+        .debug-bar { background: #1a1a1a; color: #00ff00; font-family: monospace; font-size: 11px; padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; word-break: break-all; }
 
         .refresh-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; flex-wrap: wrap; gap: 8px; }
         .refresh-left { display: flex; align-items: center; gap: 10px; }
@@ -394,18 +479,30 @@ export default function MastersLeaderboard() {
         .pick-num { color: var(--gold); font-weight: 700; font-size: 12px; min-width: 18px; }
 
         .manage-section { display: flex; flex-direction: column; gap: 16px; }
+        .manage-tabs { display: flex; gap: 2px; background: #e8e0d0; border-radius: 8px; padding: 3px; margin-bottom: 4px; }
+        .manage-tab { flex: 1; padding: 8px; text-align: center; font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; border: none; background: none; cursor: pointer; border-radius: 6px; color: #888; font-family: 'Source Sans 3', sans-serif; transition: all 0.2s; }
+        .manage-tab.active { background: var(--green-deep); color: var(--gold); }
         .manage-note { background: #e8f5ee; border: 1px solid #b2dfca; border-radius: 8px; padding: 12px 16px; font-size: 13px; color: var(--green-mid); line-height: 1.5; }
         .manage-card { background: var(--warm-white); border-radius: 10px; border: 1px solid #e8e0d0; padding: 16px 18px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
         .manage-card-name { font-weight: 700; font-size: 15px; color: var(--text-dark); }
         .manage-card-golfers { font-size: 12px; color: #777; margin-top: 2px; }
-        .manage-actions { display: flex; gap: 8px; flex-shrink: 0; }
+        .manage-card-meta { font-size: 11px; color: #aaa; margin-top: 2px; }
+        .manage-actions { display: flex; gap: 8px; flex-shrink: 0; align-items: center; }
         .btn-sm { padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; border: 1px solid transparent; font-family: 'Source Sans 3', sans-serif; }
         .btn-edit { background: var(--green-deep); color: var(--gold); }
         .btn-edit:hover { background: var(--green-mid); }
         .btn-delete { background: white; color: var(--red); border-color: #fcc; }
         .btn-delete:hover { background: #fee; }
+        .btn-activate { background: white; color: var(--green-deep); border-color: #b2dfca; }
+        .btn-activate:hover { background: #e8f5ee; }
+        .btn-active-label { font-size: 11px; font-weight: 700; color: var(--green-light); letter-spacing: 0.06em; text-transform: uppercase; padding: 6px 10px; }
         .btn-add { background: var(--gold); color: var(--green-deep); border: none; border-radius: 8px; padding: 11px 20px; font-size: 14px; font-weight: 700; cursor: pointer; font-family: 'Source Sans 3', sans-serif; transition: background 0.2s; margin-top: 4px; }
         .btn-add:hover { background: var(--gold-light); }
+        .btn-add:disabled { opacity: 0.6; cursor: not-allowed; }
+        .tournament-form { background: var(--warm-white); border-radius: 10px; border: 1px solid #e8e0d0; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+        .tournament-form h4 { font-family: 'Playfair Display', serif; font-size: 15px; font-weight: 700; color: var(--green-deep); }
+        .form-row { display: flex; gap: 10px; }
+        .form-row .form-group { flex: 1; margin-bottom: 0; }
 
         .pw-gate { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 48px 24px; gap: 16px; }
         .pw-gate-icon { font-size: 36px; margin-bottom: 4px; }
@@ -441,14 +538,18 @@ export default function MastersLeaderboard() {
           .golfer-row { border-right: none !important; }
           .golfer-row:nth-last-child(-n+2) { border-bottom: 1px solid #f0e8d8; }
           .golfer-row:last-child { border-bottom: none; }
+          .form-row { flex-direction: column; }
         }
       `}</style>
 
       <div className="app">
         <header className="header">
           <div className="header-inner">
-            <div className="header-flag">⛳ Augusta National · 2026</div>
-            <h1>The <span>Masters</span><br />Pick'em</h1>
+            <div className="header-flag">⛳ Golf Pick'em</div>
+            <h1>The <span>Sweepstake</span><br />Leaderboard</h1>
+            {activeTournament && (
+              <div className="tournament-badge">{activeTournament.name} · {activeTournament.year}</div>
+            )}
             <p className="header-sub">4 picks · Under par scores · +5 for missed cuts</p>
             <div className="header-divider" />
           </div>
@@ -482,6 +583,9 @@ export default function MastersLeaderboard() {
                   {loading ? <span className="spin">↻</span> : "↻"} {loading ? "Fetching…" : "Refresh Now"}
                 </button>
               </div>
+
+              {/* ── DEBUG BAR — remove after fixing ── */}
+              {debugInfo && <div className="debug-bar">🔍 {debugInfo}</div>}
 
               {error && <div className="error-bar">⚠️ {error}</div>}
 
@@ -600,19 +704,21 @@ export default function MastersLeaderboard() {
             <div className="picks-grid">
               {picksLoading
                 ? <div className="loading-state"><span className="spin">↻</span></div>
-                : picks.map((pick) => (
-                  <div key={pick.id} className="pick-card">
-                    <h3>{pick.name}</h3>
-                    <ul className="pick-list">
-                      {pick.golfers.map((g, i) => (
-                        <li key={i}>
-                          <span className="pick-num">{i + 1}.</span>
-                          {g || <em style={{ color: "#bbb" }}>Empty</em>}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ))
+                : picks.length === 0
+                  ? <div className="empty-state">No picks yet for {activeTournament?.name}.</div>
+                  : picks.map((pick) => (
+                    <div key={pick.id} className="pick-card">
+                      <h3>{pick.name}</h3>
+                      <ul className="pick-list">
+                        {pick.golfers.map((g, i) => (
+                          <li key={i}>
+                            <span className="pick-num">{i + 1}.</span>
+                            {g || <em style={{ color: "#bbb" }}>Empty</em>}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))
               }
             </div>
           )}
@@ -623,7 +729,7 @@ export default function MastersLeaderboard() {
               <div className="pw-gate">
                 <div className="pw-gate-icon">🔒</div>
                 <h3>Admin Access</h3>
-                <p>Enter the password to add or edit picks.</p>
+                <p>Enter the password to manage picks and tournaments.</p>
                 <div className="pw-row">
                   <input
                     className={"pw-input" + (pwError ? " error" : "")}
@@ -647,30 +753,86 @@ export default function MastersLeaderboard() {
               </div>
             ) : (
               <div className="manage-section">
-                <div className="manage-note">
-                  ✏️ Changes are shared with everyone instantly. Missed cut players receive an automatic <strong>+5 penalty</strong>.
-                  <span style={{ float: "right", cursor: "pointer", color: "#aaa", fontSize: 12 }}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div className="manage-tabs">
+                    <button className={"manage-tab" + (manageTab === "picks" ? " active" : "")} onClick={() => setManageTab("picks")}>Picks</button>
+                    <button className={"manage-tab" + (manageTab === "tournaments" ? " active" : "")} onClick={() => setManageTab("tournaments")}>Tournaments</button>
+                  </div>
+                  <span style={{ cursor: "pointer", color: "#aaa", fontSize: 12 }}
                     onClick={() => { setManageUnlocked(false); setPwInput(""); }}>🔒 Lock</span>
                 </div>
+
                 {dbError && <div className="db-error">⚠️ {dbError}</div>}
-                {picksLoading
-                  ? <div className="loading-state"><span className="spin">↻</span> Loading…</div>
-                  : picks.map((pick) => (
-                    <div key={pick.id} className="manage-card">
-                      <div>
-                        <div className="manage-card-name">{pick.name}</div>
-                        <div className="manage-card-golfers">{pick.golfers.filter(Boolean).join(" · ")}</div>
-                      </div>
-                      <div className="manage-actions">
-                        <button className="btn-sm btn-edit" onClick={() => startEdit(pick)}>Edit</button>
-                        <button className="btn-sm btn-delete" onClick={() => deletePick(pick.id)}>✕</button>
-                      </div>
+
+                {manageTab === "picks" && (
+                  <>
+                    <div className="manage-note">
+                      ✏️ Managing picks for <strong>{activeTournament?.name} {activeTournament?.year}</strong>. Changes are shared with everyone instantly.
                     </div>
-                  ))
-                }
-                <button className="btn-add" onClick={() => { setEditingPick("new"); setEditForm({ name: "", golfers: ["", "", "", ""] }); }}>
-                  + Add Friend
-                </button>
+                    {picksLoading
+                      ? <div className="loading-state"><span className="spin">↻</span> Loading…</div>
+                      : picks.map((pick) => (
+                        <div key={pick.id} className="manage-card">
+                          <div>
+                            <div className="manage-card-name">{pick.name}</div>
+                            <div className="manage-card-golfers">{pick.golfers.filter(Boolean).join(" · ")}</div>
+                          </div>
+                          <div className="manage-actions">
+                            <button className="btn-sm btn-edit" onClick={() => startEdit(pick)}>Edit</button>
+                            <button className="btn-sm btn-delete" onClick={() => deletePick(pick.id)}>✕</button>
+                          </div>
+                        </div>
+                      ))
+                    }
+                    <button className="btn-add" onClick={() => { setEditingPick("new"); setEditForm({ name: "", golfers: ["", "", "", ""] }); }}>
+                      + Add Friend
+                    </button>
+                  </>
+                )}
+
+                {manageTab === "tournaments" && (
+                  <>
+                    <div className="manage-note">
+                      🏆 Create a new tournament to start a fresh sweepstake. Setting one as active updates the leaderboard for all users.
+                    </div>
+                    <div className="tournament-form">
+                      <h4>New Tournament</h4>
+                      <div className="form-row">
+                        <div className="form-group">
+                          <label className="form-label">Name</label>
+                          <input className="form-input" value={tournamentForm.name}
+                            onChange={(e) => setTournamentForm({ ...tournamentForm, name: e.target.value })}
+                            placeholder="e.g. The Masters" />
+                        </div>
+                        <div className="form-group" style={{ maxWidth: 90 }}>
+                          <label className="form-label">Year</label>
+                          <input className="form-input" type="number" value={tournamentForm.year}
+                            onChange={(e) => setTournamentForm({ ...tournamentForm, year: parseInt(e.target.value) })} />
+                        </div>
+                      </div>
+                      <button className="btn-add" onClick={createTournament}
+                        disabled={savingTournament || !tournamentForm.name.trim()}>
+                        {savingTournament ? "Creating…" : "+ Create & Set Active"}
+                      </button>
+                    </div>
+                    {allTournaments.map((t) => (
+                      <div key={t.id} className="manage-card">
+                        <div>
+                          <div className="manage-card-name">{t.name} · {t.year}</div>
+                          <div className="manage-card-meta">
+                            {new Date(t.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+                          </div>
+                        </div>
+                        <div className="manage-actions">
+                          {t.active
+                            ? <span className="btn-active-label">✓ Active</span>
+                            : <button className="btn-sm btn-activate" onClick={() => setTournamentActive(t)}>Set Active</button>
+                          }
+                        </div>
+                      </div>
+                    ))}
+                  </>
+                )}
               </div>
             )
           )}
@@ -711,7 +873,8 @@ export default function MastersLeaderboard() {
         )}
 
         <footer className="footer">
-          THE MASTERS · AUGUSTA NATIONAL · PAR 72 · LIVE VIA ESPN · AUTO-REFRESH 60s
+          GOLF PICK'EM · LIVE VIA ESPN · AUTO-REFRESH 60s
+          {activeTournament && (" · " + activeTournament.name.toUpperCase() + " " + activeTournament.year)}
         </footer>
       </div>
     </>
