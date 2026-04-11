@@ -70,17 +70,13 @@ async function fetchGolferScores(golferNames) {
 
 const competitors = data?.events?.[0]?.competitions?.[0]?.competitors ?? [];
 
-// Find the furthest round any player has reached
-// If nobody has played more than 2 rounds, the cut hasn't happened yet
-const maxRoundsPlayed = Math.max(0, ...competitors.map(c => (c.linescores ?? []).length));
-const cutHasHappened = maxRoundsPlayed >= 3;
-
 const espnPlayers = competitors.map((c) => {
   const athlete = c.athlete ?? {};
   const rawScore = c.score ?? "0";
   const score = rawScore === "E" ? 0 : (parseInt(rawScore, 10) || 0);
   const roundsPlayed = (c.linescores ?? []).length;
-  const missedCut = cutHasHappened && roundsPlayed <= 2;
+  const missedCut = roundsPlayed <= 2;
+
     // Round scores from linescores — each has period (1-4) and displayValue like "-6", "E"
     const rounds = [null, null, null, null];
     for (const round of (c.linescores ?? [])) {
