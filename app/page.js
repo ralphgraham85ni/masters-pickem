@@ -72,18 +72,21 @@ const competitors = data?.events?.[0]?.competitions?.[0]?.competitors ?? [];
 
 // Work out if the cut has happened before mapping players
 const maxRoundsPlayed = competitors.reduce((max, c) => {
-  return Math.max(max, (c.linescores ?? []).length);
+  const validRounds = (c.linescores ?? []).filter(r => r.value > 0 || r.displayValue !== "-").length;
+  return Math.max(max, validRounds);
 }, 0);
 const cutHasHappened = maxRoundsPlayed >= 3;
-
 console.log("Cut check — max rounds:", maxRoundsPlayed, "cut happened:", cutHasHappened);
 
 const espnPlayers = competitors.map((c) => {
   const athlete = c.athlete ?? {};
   const rawScore = c.score ?? "0";
   const score = rawScore === "E" ? 0 : (parseInt(rawScore, 10) || 0);
-  const roundsPlayed = (c.linescores ?? []).length;
-  const missedCut = cutHasHappened && roundsPlayed <= 2;
+
+  // ESPN adds placeholder rounds with value:0 and displayValue:"-" for missed cut players
+// Count only rounds that have actually been played
+const roundsPlayed = (c.linescores ?? []).filter(r => r.value > 0 || r.displayValue !== "-").length;
+const missedCut = cutHasHappened && roundsPlayed <= 2;
 
 
 
