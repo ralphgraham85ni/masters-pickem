@@ -70,6 +70,10 @@ async function fetchGolferScores(golferNames) {
 
 const competitors = data?.events?.[0]?.competitions?.[0]?.competitors ?? [];
 
+const tournamentStatus = data?.events?.[0]?.status?.type?.name ?? "";
+const tournamentComplete = tournamentStatus === "STATUS_FINAL";
+
+
 // Work out if the cut has happened before mapping players
 const maxRoundsPlayed = competitors.reduce((max, c) => {
   const validRounds = (c.linescores ?? []).filter(r => r.value > 0 || r.displayValue !== "-").length;
@@ -77,6 +81,7 @@ const maxRoundsPlayed = competitors.reduce((max, c) => {
 }, 0);
 const cutHasHappened = maxRoundsPlayed >= 3;
 console.log("Cut check — max rounds:", maxRoundsPlayed, "cut happened:", cutHasHappened);
+
 
 const espnPlayers = competitors.map((c) => {
   const athlete = c.athlete ?? {};
@@ -89,6 +94,7 @@ const roundsPlayed = (c.linescores ?? []).filter(
   r => r.value > 0 || r.displayValue !== "-"
 ).length;
 const missedCut = cutHasHappened && roundsPlayed <= 2 && score > 0;
+const isWinner = c.order === 1 && roundsPlayed === 4 && tournamentComplete;
 
 
 
@@ -106,6 +112,7 @@ const missedCut = cutHasHappened && roundsPlayed <= 2 && score > 0;
       espnName: (athlete.displayName ?? athlete.fullName ?? "").trim(),
       score,
       missedCut,
+isWinner,
       position: c.status?.displayValue ?? "-",
       rounds,
     };
@@ -115,8 +122,8 @@ const missedCut = cutHasHappened && roundsPlayed <= 2 && score > 0;
   for (const name of golferNames) {
     const match = findBestMatch(name, espnPlayers);
     result[name] = match
-      ? { score: match.score, missedCut: match.missedCut, position: match.position, rounds: match.rounds }
-      : { score: 0, missedCut: false, position: "-", rounds: [null, null, null, null] };
+      ? { score: match.score, missedCut: match.missedCut, isWinner: match.isWinner, position: match.position, rounds: match.rounds }
+      : { score: 0, missedCut: false,  isWinner: false,position: "-", rounds: [null, null, null, null] };
   }
   return result;
 }
@@ -261,9 +268,15 @@ export default function MastersLeaderboard() {
         const s = scores[name];
         if (!s || !name) return { name, score: null, missedCut: false, position: "-" };
         hasScores = true;
-        const effectiveScore = s.missedCut ? (s.score || 0) + 5 : s.score || 0;
+        
+const effectiveScore = s.missedCut
+  ? (s.score || 0) + 5
+  : s.isWinner
+    ? (s.score || 0) - 5
+    : s.score || 0;
+
         total += effectiveScore;
-        return { name, score: s.score, effectiveScore, missedCut: s.missedCut, position: s.position };
+        return { name, score: s.score, effectiveScore, missedCut: s.missedCut, isWinner: s.isWinner, position: s.position };
       });
       return { ...pick, golferDetails, total: hasScores ? total : null };
     })
@@ -548,6 +561,7 @@ export default function MastersLeaderboard() {
                               <span className="golfer-name">
                                 {g.name}
                                 {g.missedCut && <span className="mc-badge">MC</span>}
+{g.isWinner && <span className="win-badge">🏆 W</span>}
                               </span>
                               <span className="golfer-pos">{g.position !== "-" ? g.position : ""}</span>
                             </div>
@@ -556,6 +570,7 @@ export default function MastersLeaderboard() {
                                 {g.score !== null ? scoreDisplay(g.score) : "—"}
                               </div>
                               {g.missedCut && <span className="penalty-note">+5 pen.</span>}
+{g.isWinner && <span className="winner-note">-5 bonus</span>}
                             </div>
                           </div>
                         ))}
